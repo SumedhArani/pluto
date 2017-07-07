@@ -51,7 +51,7 @@
 #define DEFAULT_L2_CACHE_SIZE (256*1024)
 #define DEFAULT_L1_CACHE_LINESIZE 64
 #define DEFAULT_DATA_TYPE double
-#define BASE_TILE_SIZE 8
+#define BASE_TILE_SIZE 16
 
 #define CST_WIDTH (npar+1+nstmts*(nvar+1)+1)
 

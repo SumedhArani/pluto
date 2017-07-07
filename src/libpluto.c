@@ -34,6 +34,8 @@
 #include "candl/scop.h"
 #include "isl.h"
 
+#define inverse(x) 1/x
+
 PlutoOptions *options;
 
 /* Copied from petext.c */
@@ -44,8 +46,6 @@ struct pluto_access_meta_info {
     int stmt_dim;
     int npar;
 };
-
-
 
 /* Copied from petext.c */
 /* Extract a Pluto access function from isl_basic_map */
@@ -774,7 +774,6 @@ int get_tile_dim(PlutoProg *prog,
     return max_dim;
 }
 
-
 int *get_auto_tile_size(PlutoProg *prog,
                         isl_union_set *domains,
                         isl_union_map *read,
@@ -795,33 +794,31 @@ int *get_auto_tile_size(PlutoProg *prog,
     // Collect data of candidate tile size 
     tile_space = isl_space_set_alloc(ctx, 0, max_dim);
     tile_sizes = isl_set_universe(isl_space_copy(tile_space));
-    for (i = 0; i < max_dim; i++) 
-    {
+    for (i = 0; i < max_dim; i++) {
         c = isl_constraint_alloc_inequality(isl_local_space_from_space(isl_space_copy(tile_space)));
         c = isl_constraint_set_coefficient_si(c, isl_dim_set, i, 1);
-        c = isl_constraint_set_constant_si(c, -3);
+        c = isl_constraint_set_constant_si(c, -4);
         tile_sizes = isl_set_add_constraint(tile_sizes, c);
 
         c = isl_constraint_alloc_inequality(isl_local_space_from_space(isl_space_copy(tile_space)));
         c = isl_constraint_set_coefficient_si(c, isl_dim_set, i, -1);
-        c = isl_constraint_set_constant_si(c, 4);
+        c = isl_constraint_set_constant_si(c, 5);
         tile_sizes = isl_set_add_constraint(tile_sizes, c);
     }
 
     int sample_size = (int) pow(2, max_dim);
     float* slopes = (float*)malloc(max_dim*sizeof(float));
-    float* coeffs = (float*)malloc((max_dim-1)*sizeof(float));
-    int* best_fit_size = (int*)malloc(max_dim*sizeof(int));
+    float* coeffs = (float*)calloc(max_dim, sizeof(float));
+    float* y_coeffs = (float*)malloc(max_dim*sizeof(float));
+    int* tile_size_final = (int*)calloc(max_dim, sizeof(int));
 
-    struct pluto_tile_footprint_meta_info psmi = {prog, 0, 0, read, write, domains, 0, 0, true};
+    struct pluto_tile_footprint_meta_info psmi = {prog, 0, 0, read, write, domains, true};
     long* slope_data = (long*) malloc(sample_size*sizeof(long));
     struct pluto_auto_tile_meta_info patmi = {slope_data, &psmi, 0};
     isl_set_foreach_point(tile_sizes, tile_footprint_for_tile_size, &patmi);
     isl_set_free(tile_sizes);
     isl_space_free(tile_space); 
 
-    //calculates slope for each line 
-    //in the order inner to outer
     for(i=0; i< max_dim; i++)
     {
         int temp = (int) pow(2, i);
@@ -830,23 +827,62 @@ int *get_auto_tile_size(PlutoProg *prog,
         slopes[i] = slope;
     }
 
-    //calculates coefficients
-    //the change in slope of outer loops
-    for(i=0; i<(max_dim-1); i++)
+    for(i=1; i<max_dim; i++)
     {
-        int temp = (int) pow(2, i);
+        int temp = (int) pow(2, i-1);
         float gr1 = (float) patmi.slope_data[temp]/patmi.slope_data[0];
         float gr2 = (float) patmi.slope_data[3*temp]/patmi.slope_data[0];
         float coeff = (gr2 - gr1)/BASE_TILE_SIZE;
-        coeffs[i] = coeff;
+        coeffs[i] = coeff - slopes[i];
     }
-  
+
+    float tsum ;
+    for(i=0; i<max_dim; i++)
+    {
+        tsum+=(int)inverse(slopes[i]);
+        tile_size_final[i]=BASE_TILE_SIZE;
+    }
+
+    //Task - Choosing appropriate y-coeffs
+    y_coeffs[max_dim-1] = (float)DEFAULT_L2_CACHE_SIZE/slope_data[0];
+
+    float partial_sum;
+    float fraction;
+    for(i=0; i<max_dim-1; ++i)
+    {
+        partial_sum += (float)inverse(slopes[i]);
+        fraction = partial_sum/tsum;
+        y_coeffs[i] = (float) (fraction*y_coeffs[max_dim-1]);
+    }   
+
+    //Tile size for innermost loop
+    //include vectorisation
+    //Also need to change the loop
+    tile_size_final[0] = (y_coeffs[0]-1.0)/slopes[0];
+
+    //Model
+    float numerator;
+    float partial_denominator=0;
+    float denominator;
+    for(int i = 1; i< max_dim ; i++)
+    {
+        numerator = y_coeffs[i]-y_coeffs[i-1];
+        partial_denominator += ((coeffs[i]*tile_size_final[i-1])/BASE_TILE_SIZE);
+        denominator = slopes[i]+partial_denominator;
+        tile_size_final[i] = numerator/denominator;
+    }
+
+    for (int i = 0; i < max_dim; ++i)
+    {
+        tile_size_final[i] -= tile_size_final[i]%4;
+        tile_size_final[i]+=BASE_TILE_SIZE;
+    }
+
     /*
     //Growing in multiples of 16
     tile_space = isl_space_set_alloc(ctx, 0, 2*max_dim);
     tile_sizes = isl_set_universe(isl_space_copy(tile_space));
-    for (i = 0; i < max_dim; i++) 
-    {
+    for (i = 0; i < max_dim; i++) {
         int lb = psmi.best_fit_size[i];
         int ub = (int) pow(2, (int) (log2l(psmi.best_fit_size[i]))+1);
 
@@ -877,21 +913,18 @@ int *get_auto_tile_size(PlutoProg *prog,
     isl_set_foreach_point(tile_sizes, tile_footprint_for_tile_size, &psmi);
     isl_set_free(tile_sizes);
     isl_space_free(tile_space);
-    */
-    for (j = 0; j < max_dim; j++)
-            best_fit_size[j] = 8;
 
-    if (!prog->options->silent && best_fit_size) 
-    {
+    */
+    if (!prog->options->silent && tile_size_final) {
         printf("\nAuto-selected tile size is ");
         for (j = 0; j < max_dim; j++)
-            printf("%d ", best_fit_size[j]);
+            printf("%d ", tile_size_final[j]);
         printf("\n\n");
     }
 
-    //    printf("\n%lu\n", best_fit_footprint);
+    //    printf("\n%lu\n", psmi.best_fit_footprint);
     free(slopes);
-    return best_fit_size;
+    return tile_size_final;
 }
 
 /*
